@@ -107,12 +107,14 @@ int main(int argc, char* argv[])
     SetConsoleOutputCP(CP_UTF8);
 
     const std::string outPath = (argc > 1) ? argv[1] : "test_media.mp4";
+    const bool videoOnly = (argc > 2 && std::strcmp(argv[2], "videoonly") == 0);
 
     std::printf("==================================================\n");
     std::printf(" 测试素材生成器\n");
-    std::printf(" 目标: %s\n", outPath.c_str());
-    std::printf(" 规格: %dx%d @ %dfps, %d 秒 | %dHz %d 声道\n",
-                kWidth, kHeight, kFps, kSeconds, kSampleRate, kChannels);
+    std::printf(" 目标: %s%s\n", outPath.c_str(), videoOnly ? "  [纯视频]" : "");
+    std::printf(" 规格: %dx%d @ %dfps, %d 秒%s\n",
+                kWidth, kHeight, kFps, kSeconds,
+                videoOnly ? "" : " | 44100Hz 2 声道");
     std::printf("==================================================\n");
 
     AVFormatContext* oc = nullptr;
@@ -150,15 +152,17 @@ int main(int argc, char* argv[])
     vst->time_base = vc->time_base;
 
     AVStream* ast = nullptr;
-    AVCodecContext* ac = openStream(oc, &ast, AV_CODEC_ID_AAC, "aac");
-    if (!ac)
-        return 1;
-    ac->sample_rate = kSampleRate;
-    av_channel_layout_default(&ac->ch_layout, kChannels);
-    ac->time_base   = AVRational{1, kSampleRate};
-    ac->bit_rate    = 128000;
+    AVCodecContext* ac = nullptr;
 
-    {
+    if (!videoOnly) {
+        ac = openStream(oc, &ast, AV_CODEC_ID_AAC, "aac");
+        if (!ac)
+            return 1;
+        ac->sample_rate = kSampleRate;
+        av_channel_layout_default(&ac->ch_layout, kChannels);
+        ac->time_base   = AVRational{1, kSampleRate};
+        ac->bit_rate    = 128000;
+
         ac->sample_fmt = AV_SAMPLE_FMT_NONE;
         const void* cfgList = nullptr;
         int cfgCount = 0;
@@ -174,21 +178,23 @@ int main(int argc, char* argv[])
             ac->sample_fmt = AV_SAMPLE_FMT_FLTP;
             std::printf("  查询采样格式失败，回退为 FLTP\n");
         }
-    }
 
-    ret = avcodec_open2(ac, nullptr, nullptr);
-    if (ret < 0) {
-        std::fprintf(stderr, "打开音频编码器失败\n");
-        return 1;
+        ret = avcodec_open2(ac, nullptr, nullptr);
+        if (ret < 0) {
+            std::fprintf(stderr, "打开音频编码器失败\n");
+            return 1;
+        }
+        if (ac->frame_size <= 0) {
+            std::fprintf(stderr, "音频编码器未给出 frame_size，无法分包\n");
+            return 1;
+        }
+        std::printf("  音频采样格式: %s, 每帧 %d 个采样\n",
+                    av_get_sample_fmt_name(ac->sample_fmt), ac->frame_size);
+        avcodec_parameters_from_context(ast->codecpar, ac);
+        ast->time_base = ac->time_base;
+    } else {
+        std::printf("  [videoonly] 跳过音频流，生成纯视频素材\n");
     }
-    if (ac->frame_size <= 0) {
-        std::fprintf(stderr, "音频编码器未给出 frame_size，无法分包\n");
-        return 1;
-    }
-    std::printf("  音频采样格式: %s, 每帧 %d 个采样\n",
-                av_get_sample_fmt_name(ac->sample_fmt), ac->frame_size);
-    avcodec_parameters_from_context(ast->codecpar, ac);
-    ast->time_base = ac->time_base;
 
     if (!(oc->oformat->flags & AVFMT_NOFILE)) {
         ret = avio_open(&oc->pb, outPath.c_str(), AVIO_FLAG_WRITE);
@@ -231,7 +237,7 @@ int main(int argc, char* argv[])
         std::printf("  已编码视频 %d 帧\n", kVideoFrames);
     }
 
-    {
+    if (!videoOnly) {
         AVFrame* frame = av_frame_alloc();
         frame->format      = ac->sample_fmt;
         frame->sample_rate = ac->sample_rate;

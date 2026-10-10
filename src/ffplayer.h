@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -38,12 +39,22 @@ public:
 
     double  positionSeconds() const;
 
+    void setFrameCallback(std::function<void(const Frame&)> cb) { videoCb_ = std::move(cb); }
+
     int64_t durationMs() const;
 
     MessageQueue& messages() { return msgQ_; }
 
     PacketQueue& audioQueue() { return audioQ_; }
     PacketQueue& videoQueue() { return videoQ_; }
+    int droppedFrames() const { return statDroppedFrames_.load(); }
+
+    struct DemuxInfo {
+        int audioPkts = 0;
+        int videoPkts = 0;
+        int nullPkts  = 0;
+    };
+    DemuxInfo demuxInfo() const;
 
     struct AudioOutInfo {
         int     targetSampleRate = 0;
@@ -59,6 +70,9 @@ private:
     void readThread();
     void handleSeekRequest();
     void audioDecodeThread();
+    void videoDecodeThread();
+    void videoRefreshThread();
+    void videoRefresh(double& remainingTime);
 
     int decodeOneAudioFrame();
 
@@ -76,6 +90,9 @@ private:
     Clock        audClk_;
     AudioDevice  audioDev_;
 
+    std::function<void(const Frame&)> videoCb_;
+    bool videoClockInit_ = false;
+
     AVFormatContextPtr ic_;
     AVStream* audioSt_ = nullptr;
     AVStream* videoSt_ = nullptr;
@@ -90,6 +107,7 @@ private:
     std::atomic<bool>    abort_{true};
     std::atomic<bool>    paused_{false};
     std::atomic<bool>    eof_{false};
+    std::atomic<bool>    completedPosted_{false};
     std::atomic<int64_t> durationUs_{AV_NOPTS_VALUE};
 
     std::mutex ctlMtx_;
@@ -114,6 +132,10 @@ private:
     int                statSwrRebuilds_   = 0;
     int64_t            statPcmBytes_      = 0;
     int                statPcmPeak_       = 0;
+    std::atomic<int>   statDroppedFrames_{0};
+    std::atomic<int>   statAudioPkts_{0};
+    std::atomic<int>   statVideoPkts_{0};
+    std::atomic<int>   statNullPkts_{0};
 };
 
 #endif

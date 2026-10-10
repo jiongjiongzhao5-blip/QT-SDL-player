@@ -6,6 +6,10 @@
 namespace {
 constexpr int kVideoQueueSize  = 3;
 constexpr int kSampleQueueSize = 9;
+
+constexpr double kRefreshInterval = 0.01;
+
+constexpr double kLateDropThreshold = 0.1;
 }
 
 FFPlayer::FFPlayer()
@@ -25,15 +29,19 @@ int FFPlayer::prepare(const std::string& url)
     abort_  = false;
     paused_ = false;
     eof_    = false;
+    completedPosted_ = false;
     durationUs_ = AV_NOPTS_VALUE;
 
     sampQ_.setPacketQueue(&audioQ_);
     pictQ_.setPacketQueue(&videoQ_);
 
     audClk_.init();
+    videoClockInit_ = false;
+    completedPosted_ = false;
     msgQ_.start();
 
     readThr_ = std::thread(&FFPlayer::readThread, this);
+    refreshThr_ = std::thread(&FFPlayer::videoRefreshThread, this);
 
     return 0;
 }
@@ -72,6 +80,8 @@ void FFPlayer::close()
     audioBufSize_ = audioBufIndex_ = 0;
     audioClock_ = std::nan("");
     resampleBuf_.clear();
+    videoClockInit_ = false;
+    completedPosted_ = false;
     eof_ = false;
 }
 
@@ -119,6 +129,15 @@ FFPlayer::AudioOutInfo FFPlayer::audioOutInfo() const
     return info;
 }
 
+FFPlayer::DemuxInfo FFPlayer::demuxInfo() const
+{
+    DemuxInfo info;
+    info.audioPkts = statAudioPkts_.load();
+    info.videoPkts = statVideoPkts_.load();
+    info.nullPkts  = statNullPkts_.load();
+    return info;
+}
+
 void FFPlayer::handleSeekRequest()
 {
     {
@@ -136,6 +155,8 @@ void FFPlayer::handleSeekRequest()
     videoQ_.reset();
     sampQ_.flush();
     pictQ_.flush();
+    videoClockInit_ = false;
+    completedPosted_ = false;
     eof_ = false;
 }
 
@@ -170,6 +191,8 @@ int FFPlayer::openComponent(AVStream* stream, AVMediaType type)
         videoTb_   = stream->time_base;
         frameRate_ = av_guess_frame_rate(ic_.get(), stream, nullptr);
         videoQ_.start();
+
+        vidDec_.start(videoQ_, [this] { videoDecodeThread(); });
     }
     return 0;
 }
@@ -238,7 +261,8 @@ void FFPlayer::readThread()
                 if (!eof_.exchange(true)) {
                     if (audioIdx_ >= 0) audioQ_.putNullPacket(audioIdx_);
                     if (videoIdx_ >= 0) videoQ_.putNullPacket(videoIdx_);
-                    msgQ_.post(FFMsg::Completed);
+                    statNullPkts_.fetch_add((audioIdx_ >= 0 ? 1 : 0)
+                                            + (videoIdx_ >= 0 ? 1 : 0));
                 }
             }
             if (ic_->pb && ic_->pb->error)
@@ -248,12 +272,15 @@ void FFPlayer::readThread()
         }
         eof_ = false;
 
-        if (pkt->stream_index == audioIdx_)
+        if (pkt->stream_index == audioIdx_) {
             audioQ_.put(pkt.get());
-        else if (pkt->stream_index == videoIdx_)
+            statAudioPkts_.fetch_add(1);
+        } else if (pkt->stream_index == videoIdx_) {
             videoQ_.put(pkt.get());
-        else
+            statVideoPkts_.fetch_add(1);
+        } else {
             av_packet_unref(pkt.get());
+        }
     }
 }
 
@@ -394,4 +421,95 @@ int FFPlayer::pullAudio(uint8_t* dst, int bytes)
     }
 
     return copied;
+}
+
+void FFPlayer::videoDecodeThread()
+{
+    AVFramePtr frame = make_frame();
+
+    while (!abort_.load()) {
+        const int got = vidDec_.decodeFrame(frame.get());
+        if (got < 0) break;
+        if (!got)  continue;
+
+        Frame* slot = pictQ_.peekWritable();
+        if (!slot) break;
+
+        const double duration = (frameRate_.num && frameRate_.den)
+                                    ? av_q2d(AVRational{frameRate_.den, frameRate_.num})
+                                    : 0.0;
+
+        const double pts = (frame->pts == AV_NOPTS_VALUE)
+                               ? std::nan("") : frame->pts * av_q2d(videoTb_);
+
+        slot->pts      = pts;
+        slot->duration = duration;
+        slot->width    = frame->width;
+        slot->height   = frame->height;
+        slot->format   = frame->format;
+        av_frame_move_ref(slot->frame.get(), frame.get());
+        pictQ_.push();
+    }
+}
+
+void FFPlayer::videoRefreshThread()
+{
+    while (!abort_.load()) {
+        double remaining = kRefreshInterval;
+
+        videoRefresh(remaining);
+
+        if (remaining > 0.0)
+            av_usleep(static_cast<unsigned>(remaining * 1'000'000.0));
+    }
+}
+
+void FFPlayer::videoRefresh(double& remainingTime)
+{
+    if (eof_.load() && !paused_.load()
+        && audioQ_.nbPackets() == 0 && videoQ_.nbPackets() == 0
+        && sampQ_.nbRemaining() == 0 && pictQ_.nbRemaining() == 0) {
+        if (!completedPosted_.exchange(true))
+            msgQ_.post(FFMsg::Completed);
+        return;
+    }
+
+    if (!videoSt_ || paused_.load())
+        return;
+    if (pictQ_.nbRemaining() == 0)
+        return;
+
+    Frame* vp = pictQ_.peek();
+
+    if (std::isnan(vp->pts)) {
+        if (videoCb_) videoCb_(*vp);
+        pictQ_.next();
+        return;
+    }
+
+    double master = audClk_.get();
+
+    if (audioIdx_ < 0) {
+        if (!videoClockInit_ || std::isnan(master) || vp->pts - master > 1.0) {
+            audClk_.set(vp->pts);
+            videoClockInit_ = true;
+            master = vp->pts;
+        }
+    }
+
+    const double diff = vp->pts - master;
+
+    if (diff > 0.0) {
+        remainingTime = std::min(remainingTime, diff);
+        return;
+    }
+
+    if (diff < -kLateDropThreshold && pictQ_.nbRemaining() > 1) {
+        statDroppedFrames_.fetch_add(1);
+        pictQ_.next();
+        return;
+    }
+
+    if (videoCb_) videoCb_(*vp);
+    pictQ_.next();
 }

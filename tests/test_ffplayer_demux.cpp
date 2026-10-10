@@ -174,53 +174,57 @@ int main(int argc, char* argv[])
 
     section("[3] 包分发统计");
     {
-        std::vector<Rec> msgs;
-        const bool gotCompleted = waitUntil(player, FFMsg::Completed, 8000, &msgs);
-        check(gotCompleted, "读完整个文件后收到 Completed");
+        msleep(1500);
+        std::printf("        （等待 1.5 秒，让 readThread 把整个文件读完并分发）\n");
 
-        const int aq = player.audioQueue().nbPackets();
-        const int vq = player.videoQueue().nbPackets();
-        std::printf("        队列里的条目数: 音频 %d，视频 %d\n", aq, vq);
-        std::printf("        投递总量      : 音频 %d，视频 %d\n",
-                    ref.audioPkts + 2, ref.videoPkts + 2);
+        const auto d = player.demuxInfo();
+        std::printf("        分发给音频队列: %d 个真实包（参考 %d）\n",
+                    d.audioPkts, ref.audioPkts);
+        std::printf("        分发给视频队列: %d 个真实包（参考 %d）\n",
+                    d.videoPkts, ref.videoPkts);
+        std::printf("        当前队列残留  : 音频 %d，视频 %d（仅是瞬时值）\n",
+                    player.audioQueue().nbPackets(), player.videoQueue().nbPackets());
 
-        check(vq == ref.videoPkts + 2,
-              "★ 视频队列条目数 = 真实视频包数 + flush 标记 + EOF 空包（当前尚无消费者）");
-
+        check(d.audioPkts == ref.audioPkts, "★ 音频包一个不多一个不少地分发完了");
+        check(d.videoPkts == ref.videoPkts, "★ 视频包一个不多一个不少地分发完了");
         check(player.audioQueue().serial() >= 1, "音频队列已被启动（serial >= 1）");
-        check(aq <= ref.audioPkts + 2, "音频队列存量不超过投递总量");
+        check(player.videoQueue().serial() >= 1, "视频队列已被启动（serial >= 1）");
+
         msleep(300);
         const auto info = player.audioOutInfo();
-        std::printf("        音频解码线程已解出 %d 帧（说明消费者确实在工作）\n",
-                    info.decodedFrames);
+        std::printf("        音频解码线程已解出 %d 帧\n", info.decodedFrames);
         check(info.decodedFrames > 0,
-              "★ 音频链路有消费者在取包 —— 分发确实发生了，只是被即时消耗了");
+              "★ 下游消费者确实在工作 —— 分发出去的数据被实时消化了");
     }
 
     section("[4] ★ EOF 信号验证（M6 修复的直接证据）");
     {
+        const auto d = player.demuxInfo();
+        std::printf("        readThread 投递的 EOF 空包数: %d（音频 1 + 视频 1 = 2）\n",
+                    d.nullPkts);
+        check(d.nullPkts == 2, "★★ 两路各投了一个【空包】—— 这就是 EOF 信号");
+
         AVPacketPtr pkt = make_packet();
         int  total = 0, flushMarkers = 0, nullPackets = 0;
         int64_t lastSize = -1;
         int  serial = -1;
         bool isFlush = false;
-
         while (player.videoQueue().get(pkt.get(), false, &serial, &isFlush) == 1) {
             ++total;
-            if (isFlush)                              ++flushMarkers;
-            else if (pkt->size == 0)                   ++nullPackets;
+            if (isFlush)            ++flushMarkers;
+            else if (pkt->size == 0) ++nullPackets;
             lastSize = isFlush ? 0 : pkt->size;
         }
-
-        std::printf("        视频队列共 %d 条：flush 标记 %d 个，EOF 空包 %d 个\n",
+        std::printf("        视频队列剩余 %d 条（其中 flush 标记 %d，空包 %d）\n",
                     total, flushMarkers, nullPackets);
-        check(flushMarkers == 1, "队列头部有 1 个 flush 标记（start() 放的，serial=1）");
-        check(nullPackets == 1,
-              "★★ 队列里恰好有 1 个【空包】—— 这就是 EOF 信号");
-        check(lastSize == 0, "空包位于队尾 —— 顺序正确（必须最后才被解码器取到）");
+        if (nullPackets > 0) {
+            check(lastSize == 0, "剩下的那个空包位于队尾 —— 顺序正确");
+        } else {
+            std::printf("        （空包已被视频解码线程取走，并在解码器里触发了 draining）\n");
+        }
         std::printf("        → 没有这个空包，解码器就不会进入 draining 模式，\n");
         std::printf("          尾部约 2 帧画面永远不显示，解码线程还会一直阻塞。\n");
-        std::printf("          这就是 M6 发现、本轮修好的缺陷。\n");
+        std::printf("          这就是 M6 发现、M8 修好的缺陷。\n");
     }
 
     section("[5] seek");
@@ -255,8 +259,8 @@ int main(int argc, char* argv[])
             const double maxMs = maxPts * av_q2d(ref.videoTb) * 1000.0;
             std::printf("        队列里视频包 pts 范围 %.0f ~ %.0f ms（目标是 2000ms）\n",
                         minMs, maxMs);
-            check(minMs >= 1500 && minMs <= 2100,
-                  "落点接近 2000ms（用 AVSEEK_FLAG_BACKWARD，会往前找关键帧，所以可能略早）");
+            check(minMs > 1500,
+                  "★ 队列里都是 seek 之后的新数据（0 秒附近的旧包已被清掉）");
             check(serial2 == serialAfter, "新数据带的是 seek 之后的 serial");
         }
     }
