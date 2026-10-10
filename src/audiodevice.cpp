@@ -92,6 +92,7 @@ void AudioDevice::setSpeed(float ratio)
 {
     if (stream_)
         SDL_SetAudioStreamFrequencyRatio(stream_, ratio);
+    speed_ = ratio;
 }
 
 int AudioDevice::frameBytes() const
@@ -101,5 +102,5 @@ int AudioDevice::frameBytes() const
 
 int AudioDevice::bytesPerSecond() const
 {
-    return spec_.freq * frameBytes();
+    return static_cast<int>(spec_.freq * frameBytes() * speed_);
 }

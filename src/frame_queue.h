@@ -17,6 +17,8 @@ struct Frame
     int    width    = 0;
     int    height   = 0;
     int    format   = 0;
+
+    int    serial   = 0;
 };
 
 class FrameQueue

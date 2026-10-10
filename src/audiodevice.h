@@ -26,6 +26,7 @@ public:
     void setPaused(bool paused);
     void setVolume(float linear01);
     void setSpeed(float ratio);
+    float speed() const { return speed_; }
 
     int sampleRate() const { return spec_.freq; }
     int channels() const { return spec_.channels; }
@@ -39,6 +40,7 @@ private:
     SDL_AudioStream* stream_ = nullptr;
     SDL_AudioSpec    spec_{};
     PullCallback     pull_;
+    float            speed_  = 1.0f;
 };
 
 #endif

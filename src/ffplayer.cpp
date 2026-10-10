@@ -102,7 +102,14 @@ void FFPlayer::setPaused(bool paused)
 
 void FFPlayer::setVolume(float linear01) { audioDev_.setVolume(linear01); }
 
-void FFPlayer::setSpeed(float ratio) { audioDev_.setSpeed(ratio); }
+void FFPlayer::setSpeed(float ratio)
+{
+    if (ratio <= 0.0f)
+        return;
+
+    audioDev_.setSpeed(ratio);
+    audClk_.setSpeed(ratio);
+}
 
 double FFPlayer::positionSeconds() const
 {
@@ -158,6 +165,9 @@ void FFPlayer::handleSeekRequest()
     videoClockInit_ = false;
     completedPosted_ = false;
     eof_ = false;
+
+    if (paused_.load() && target != AV_NOPTS_VALUE)
+        audClk_.set(static_cast<double>(target) / AV_TIME_BASE);
 }
 
 int FFPlayer::openComponent(AVStream* stream, AVMediaType type)
@@ -303,6 +313,7 @@ void FFPlayer::audioDecodeThread()
 
         slot->duration = static_cast<double>(frame->nb_samples) / frame->sample_rate;
         slot->format   = frame->format;
+        slot->serial   = audDec_.pktSerial();
 
         av_frame_move_ref(slot->frame.get(), frame.get());
         sampQ_.push();
@@ -317,7 +328,16 @@ int FFPlayer::decodeOneAudioFrame()
     if (eof_.load() && sampQ_.nbRemaining() == 0)
         return -1;
 
-    Frame* af = sampQ_.peekReadable();
+    Frame* af = nullptr;
+    for (int guard = 0; guard < 64; ++guard) {
+        af = sampQ_.peekReadable();
+        if (!af)
+            return -1;
+        if (af->serial == audioQ_.serial())
+            break;
+        sampQ_.next();
+        af = nullptr;
+    }
     if (!af)
         return -1;
 
@@ -447,6 +467,7 @@ void FFPlayer::videoDecodeThread()
         slot->width    = frame->width;
         slot->height   = frame->height;
         slot->format   = frame->format;
+        slot->serial   = vidDec_.pktSerial();
         av_frame_move_ref(slot->frame.get(), frame.get());
         pictQ_.push();
     }
@@ -480,6 +501,11 @@ void FFPlayer::videoRefresh(double& remainingTime)
         return;
 
     Frame* vp = pictQ_.peek();
+
+    if (vp->serial != videoQ_.serial()) {
+        pictQ_.next();
+        return;
+    }
 
     if (std::isnan(vp->pts)) {
         if (videoCb_) videoCb_(*vp);
