@@ -31,6 +31,15 @@ void MediaPlayer::setState(PlaybackState s)
     if (state_ == s)
         return;
     state_ = s;
+
+    qDebug() << "[MediaPlayer] 状态 ->"
+             << (s == PlaybackState::Idle      ? "Idle"
+               : s == PlaybackState::Preparing ? "Preparing"
+               : s == PlaybackState::Playing   ? "Playing"
+               : s == PlaybackState::Paused    ? "Paused"
+               : s == PlaybackState::Completed ? "Completed"
+                                               : "Error");
+
     emit stateChanged(s);
 }
 

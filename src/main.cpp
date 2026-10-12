@@ -1,27 +1,30 @@
 #include <QApplication>
 #include <QDebug>
-#include <QLabel>
-#include <QMainWindow>
+#include <QFileInfo>
+
+#include "mainwind.h"
 
 int main(int argc, char* argv[])
 {
     QApplication app(argc, argv);
 
-    QApplication::setApplicationName(QStringLiteral("voice_player_qt6"));
-    QApplication::setOrganizationName(QStringLiteral("zjj"));
+    QApplication::setApplicationName("voice_player_qt6");
+    QApplication::setOrganizationName("zjj");
 
-    QMainWindow window;
-    window.resize(1280, 800);
-    window.setWindowTitle(QStringLiteral("zjjPlayer (Qt6 + FFmpeg + SDL3)"));
-
-    auto* placeholder = new QLabel(QStringLiteral("M1 骨架已跑通 —— 等待接入内核"), &window);
-    placeholder->setAlignment(Qt::AlignCenter);
-    window.setCentralWidget(placeholder);
-
-    qDebug() << "[M1] Qt 运行时版本:" << qVersion();
-    qDebug() << "[M1] 主窗口已创建，即将进入事件循环。";
-
+    MainWind window;
     window.show();
+
+    if (argc > 1) {
+        const QString path = QString::fromLocal8Bit(argv[1]);
+        if (QFileInfo::exists(path)) {
+            qDebug() << "[main] 命令行打开:" << path;
+            window.openUrl(path);
+        } else {
+            qDebug() << "[main] 命令行参数不是有效文件，忽略:" << path;
+        }
+    } else {
+        qDebug() << "[main] 未指定文件，可通过“文件 -> 打开”选择媒体";
+    }
 
     return app.exec();
 }

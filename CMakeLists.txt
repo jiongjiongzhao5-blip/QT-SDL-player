@@ -85,12 +85,28 @@ function(vpl_copy_runtime_dlls tgt)
     endif()
 endfunction()
 
-add_executable(voice_player_learn
+add_executable(voice_player_learn WIN32
     src/main.cpp
+    src/mainwind.cpp        src/mainwind.h
+    src/ctrlbar.cpp         src/ctrlbar.h
+    src/titlebar.cpp        src/titlebar.h
+    src/playlistwind.cpp    src/playlistwind.h
+    src/displaywind.cpp     src/displaywind.h
+    src/mediaplayer.cpp     src/mediaplayer.h
+    src/ffplayer.cpp        src/ffplayer.h
+    src/decoder.cpp         src/decoder.h
+    src/packet_queue.cpp    src/packet_queue.h
+    src/frame_queue.cpp     src/frame_queue.h
+    src/message_queue.cpp   src/message_queue.h
+    src/audiodevice.cpp     src/audiodevice.h
+    src/imagescaler.cpp     src/imagescaler.h
+    src/clock.h  src/ffmsg.h  src/av_utils.h
+    resources/resources.qrc
 )
 target_include_directories(voice_player_learn PRIVATE src)
 target_link_libraries(voice_player_learn PRIVATE
     Qt6::Widgets
+    SDL3::SDL3
     vpl_ffmpeg
 )
 vpl_apply_common_options(voice_player_learn)
@@ -184,6 +200,8 @@ function(vpl_copy_sdl3_dll tgt)
             COMMENT "拷贝 SDL3.dll")
     endif()
 endfunction()
+
+vpl_copy_sdl3_dll(voice_player_learn)
 
 add_executable(test_imagescaler
     tests/test_imagescaler.cpp
